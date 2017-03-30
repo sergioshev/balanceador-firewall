@@ -1,0 +1,50 @@
+defs_file="/var/run/pppstate.defs"
+marcas_file="/etc/network/marcasfw"
+sqlite_db="/etc/network/checks.db"
+exports_dir="/root/bin"
+lock_file="/var/run/checks.lock"
+threshold="1200"
+
+ignore_iface=(
+#eth4.1050
+)
+
+target_hosts=(
+"www.google.com"
+"www.yahoo.com"
+"8.8.8.8"
+"8.8.4.4"
+)
+
+. $defs_file
+. $marcas_file
+
+function query_db {
+  local sth=$@ 
+  lockfile -2 -l 300 $lock_file
+  echo "$sth" | sqlite3 $sqlite_db
+  local res=$?
+  rm -f $lock_file
+  return $res
+}       
+   
+function dual_log {
+  prefix=$1
+  shift
+  local stamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+  if [ $# -gt 0 ] ; then 
+{ 
+cat <<FFAA
+$@
+FFAA
+} | while read line  ; do 
+      echo $prefix#$stamp#$line 
+    done 
+  fi 
+  if [ ! -t 0 ] ; then 
+    while read line ; do 
+      echo $prefix#$stamp#$line 
+    done ; 
+  fi 
+}

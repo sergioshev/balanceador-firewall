@@ -1,0 +1,11 @@
+#!/bin/bash
+#
+# Script que genera las variables de ppp relativas a hamber
+# para elmular un up o down de la ipterface
+
+. /etc/network/marcasfw
+
+export PPP_IPPARAM=${VINCULO[hamber]}
+export PPP_IFACE="eth4.1080"
+export PPP_LOCAL='172.19.1.20'
+export PPP_REMOTE='172.19.1.1'

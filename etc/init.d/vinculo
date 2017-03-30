@@ -1,0 +1,271 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:		routing
+# Required-Start:	$network
+# Required-Stop:	
+# Default-Start:	2 3 4 5
+# Default-Stop:		0 1 6
+# Short-Description:	Generador de rutas de trafico
+### END INIT INFO
+#
+# $Id: vinculo.kosovo,v 1.14 2011-05-05 19:59:45 hcurti Exp $
+#
+# Script generador de tablas de rutas e intercambiador de trafico.
+
+# Tomar informacion de los ppp para crear los vinculos.
+LOCK=/var/lock/pppstate.lock
+ESTADO=/var/run/pppstate.defs
+
+# La tabla main corresponde a la conexión de arnet
+
+TABLA=( main speedyf arnet hamber)
+
+if ! [ -r /etc/network/marcasfw ] ; then
+  echo "No existe la definición de marcas /etc/network/marcasfw. Abortado." \
+    >&2
+  exit 1
+fi
+
+. /etc/network/marcasfw
+
+if [ -r $ESTADO ] ; then
+  lockfile -2 -l 120 $LOCK && . $ESTADO
+  rm -f $LOCK
+fi
+
+ip() 
+{ 
+  echo "ip $*"
+  /sbin/ip "$@"
+}
+
+
+rutasbase() {
+  tabla=${1:-main}
+  echo "Creando rutas base para la tabla $tabla"
+  ip route add 127.0.0.0/8 dev lo table $tabla src 127.0.0.1
+  ip route add 192.168.1.0/24 dev eth0 table $tabla \
+     src 192.168.1.1
+  ip route add 192.168.0.0/24 dev eth2 table $tabla \
+     src 192.168.0.1
+  ip route add 192.168.90.0/24 dev eth4.1000 table $tabla \
+     src 192.168.90.10
+  ip route add 192.168.10.0/24 dev eth0 via 192.168.1.9 \
+     table $tabla
+
+  local PREVIOUS_ROUTERS=""
+  for I in ${FALLBACK[${VINCULO[$tabla]}]} ; do
+    if [ "x${PPP_IF[$I]}" != "x" ] ; then 
+      ip route add $(echo ${PPP_IPL[$I]} | sed -e 's/\.[^\.]\+$/.0/')/24 dev ${PPP_IF[$I]} src ${PPP_IPL[$I]} table $tabla
+      if echo $PREVIOUS_ROUTERS | grep -v -q "${PPP_IPR[$I]}" ; then
+        ip route add ${PPP_IPR[$I]} dev ${PPP_IF[$I]} src ${PPP_IPL[$I]} \
+    	           table $tabla
+        PREVIOUS_ROUTERS="$PREVIOUS_ROUTERS ${PPP_IPR[$I]}"
+      fi
+    fi
+  done
+}
+
+rutasestaticas() {
+  tabla=${1:-main}
+  echo "Creando rutas estaticas para la tabla $tabla"
+  ip route add 192.168.100.0/24 dev eth0 src 192.168.100.200 table $tabla
+}
+
+borrarReglasBasicas() {
+  declare -i PRIO=1000
+  while [ $PRIO -lt 1010 ] ; do
+    ip rule del prio $PRIO $(ip rule show | grep $PRIO | cut -f 2 -d :) \
+       &>/dev/null
+    ip rule del prio $PRIO &> /dev/null
+    PRIO+=1
+  done
+}
+
+borrarReglas() {
+  ip rule del prio 5 from 192.168.1.190
+  ip rule del prio 5 from 192.168.1.182
+  ip rule del prio 6 
+  ip rule del prio 7
+  ip rule del prio 8
+  
+  #ip rule del prio 1099
+  declare -i PRIO=1100
+  while [ $PRIO -lt 1110 ] ; do
+    ip rule del prio $PRIO $(ip rule show | grep $PRIO | cut -f 2 -d :) \
+       &>/dev/null
+    ip rule del prio $PRIO &> /dev/null
+    PRIO+=1
+  done
+  borrarReglasBasicas
+}
+
+crearTablasDeRutas() {
+  for tabla in ${TABLA[*]} ; do
+    ip route flush table $tabla &> /dev/null
+    rutasbase $tabla
+    rutasestaticas $tabla
+    local NODEFAULT=1
+    for I in ${FALLBACK[${VINCULO[$tabla]}]} ; do
+      if [ "x${PPP_IF[$I]}" != "x" ] ; then
+        ip route add default via ${PPP_IPR[$I]} dev ${PPP_IF[$I]} \
+          src ${PPP_IPL[$I]} table $tabla
+	NODEFAULT=0
+	break
+      fi
+      [ $NOFALLBACK -eq 1 ] && break
+    done
+    [ $NODEFAULT -eq 1 ] && ip route add unreachable default table $tabla
+  done
+}
+
+reglasBasicas() {
+  ip rule add prio 5 from 192.168.1.182 lookup hamber
+  ip rule add prio 5 from 192.168.1.190 lookup hamber
+  ip rule add prio 6 from 192.168.1.154 lookup arnet
+  #ip rule add prio 6 from 192.168.1.154 lookup main
+  ip rule add prio 7 from 192.168.1.100 lookup main
+  ip rule add prio 8 from 192.168.1.140 lookup speedyf
+  declare -i PRIO=1000
+  for tabla in ${TABLA[*]} ; do
+    if [ "x${PPP_IF[${VINCULO[$tabla]}]}" != "x" ] ; then
+      ip rule add prio $PRIO from ${PPP_IPL[${VINCULO[$tabla]}]} table $tabla
+    fi
+    PRIO+=1
+    ip rule add prio $PRIO fwmark ${MARCA[$tabla]} table $tabla
+    PRIO+=1
+  done
+}
+
+case "$1" in
+  start)
+        [ -r /var/run/vinculo.status ] && \
+          $0 $(cat /var/run/vinculo.status) || \
+        $0 todos
+        ;;
+  todos)
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+
+	# El tráfico especial se va por arnet.
+	#ip rule add prio 1099 fwmark ${BALANCE[especial]} table astesano
+
+	# El balance de cada uno se destina por su vinculo.
+	ip rule add prio 1100 fwmark ${BALANCE[arnet]} table arnet
+	ip rule add prio 1101 fwmark ${BALANCE[speedyf]} table speedyf
+
+	echo "Ruteando el trafico por TODOS LOS VINCULOS"
+	echo "todos" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+	;;
+
+  stop)
+	echo "Eliminando las todas las rutas"
+	for tabla in ${TABLA[*]} ; do
+	  ip route flush table $tabla
+	done
+	ip route flush cache
+	borrarReglas
+	echo "Ok"
+	;;
+
+  arnet)
+	# Todo el tráfico se dirige por arnet, salvadas las reglas básicas.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	echo "Ruteando el trafico por arnet"
+	echo "arnet" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+        ;;
+  speedyf)
+	# Todo el tráfico se dirige por speedyf, salvadas las reglas básicas.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	ip rule add prio 1100 from all table speedyf
+	echo "Ruteando el trafico por speedyf"
+	echo "speedyf" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+        ;;
+  astesano)
+	# Todo el tráfico se dirige por astesano, salvadas las reglas básicas.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	ip rule add prio 1100 from all table astesano
+	echo "Ruteando el trafico por astesano"
+	echo "astesano" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+        ;;
+
+  narnet)
+        # Todo el trafico de arnet se reparte entre speedyf y astesano.
+	# Solo el tráfico destinado a astesano se va por astesano, el resto
+	# se va por speedyf.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	ip rule add prio 1100 fwmark ${BALANCE[astesano]} table astesano
+	ip rule add prio 1101 from all table speedyf
+	echo "Ruteando el trafico por narnet"
+	echo "narnet" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+	;;
+
+  nspeedyf)
+        # Todo el trafico de speedyf se reparte entre arnet y astesano.
+	# Solo el tráfico destinado a astesano se va por astesano, el resto
+	# se va por arnet.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	ip rule add prio 1100 fwmark ${BALANCE[astesano]} table astesano
+	echo "Ruteando el trafico por nspeedyf"
+	echo "nspeedyf" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+	;;
+
+  nastesano)
+        # Todo el trafico de astesano se reparte entre arnet y speedyf.
+	# Solo el tráfico destinado a speedyf se va por speedyf, el resto
+	# se va por arnet.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	ip rule add prio 1100 fwmark ${BALANCE[speedyf]} table speedyf
+	echo "Ruteando el trafico por nastesano"
+	echo "nastesano" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+	;;
+
+  emergencia)
+        # Todo el tráfico se va por el fallback, pero por firewall se prohíbe
+	# la salida a todos menos los que están en las IPs. marcadas.
+  	crearTablasDeRutas
+        borrarReglas
+	reglasBasicas
+	echo "Ruteo de emergencia activado"
+	echo "emergencia" > /var/run/vinculo.status
+	ip route flush cache
+	/etc/init.d/firewall restart
+	;;
+
+  status)
+  	echo -n "Ruteando el trafico por "
+  	cat /var/run/vinculo.status
+  	;;
+  *)
+	echo "Uso: $0 {start|stop|todos|arnet|astesano|speedyf|narnet|nastesano|nspeedyf|emergencia|status}"
+	exit 1
+esac
+
+exit 0

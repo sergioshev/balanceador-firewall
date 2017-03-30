@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#186.109.87.81 arnet
+#201.251.127.54 speedy
+#186.125.181.20 hamber
+#200.80.247.40 astesano
+
+
+ips=(
+'186.109.87.81'
+'201.251.127.54'
+'186.125.181.20'
+'200.80.247.40'
+)
+
+IFS='
+'
+
+echo "${ips[*]}" | \
+ sed -e 's!^\([^\.]\+\)\.\([^\.]\+\)\.\([^\.]\+\)\.\([^\.]\+\)!\4.\3.\2.\1.zen.spamhaus.org A +short!' | \
+ while read params ; do 
+   res=$(echo $params |  dig -f /dev/stdin)
+   if [ -n "$res" ] ; then
+     echo $params resolvio a $res
+   fi
+ done

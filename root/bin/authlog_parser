@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+# return values
+# UNKNOWN = 3
+# CRITICAL = 2
+# WARNING = 1
+# OK = 0
+
+use strict;
+use Getopt::Std;
+use Date::Calc;
+
+# Ejemplos:
+#
+#
+# ---> desde el auth.log si sshd esta con AUTH
+# Dec 18 07:49:19 euro sshd[12389]: Failed password for root from 117.21.173.29 port 1630 ssh2
+#
+# ---> desde el syslog si sshd esta con DAEMON
+# Failed password for invalid user s from 192.168.1.154 port 53689 ssh2
+
+my $re = '.*Failed password for\s+(.*?(?=\s+from))\s+from\s(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+.*$';
+#pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=182.100.67.102  user=root
+my $re = 'pam_unix\(sshd:auth\):\s+authentication\s+failure;\s+logname=.*uid=.*tty=ssh.*rhost=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(user=(\S+))?.*$';
+
+my %opts;
+getopts('w:c:f:', \%opts);
+if (scalar(keys(%opts)) != 1) {
+  print "Usage: -f path_to_auth_log\n";
+  exit 1;
+}
+
+my $ssh_log=$opts{f};
+
+if (!open(FH , '<', $ssh_log)) {
+ print "Can't open $ssh_log : $!\n";
+ exit(1);
+}
+
+my $hits={};
+
+my @lines;
+@lines = <FH>;
+
+foreach my $line (@lines) {
+  if ($line =~ /$re/) {
+    my $user = $3;
+    my $ip = $1;
+    $hits->{$ip}->{count} = 0 if (!defined($hits->{$ip}->{count}));
+    $hits->{$ip}->{$user}->{count} = 0 if (!defined($hits->{$ip}->{$user}));
+    $hits->{$ip}->{count}++;
+    $hits->{$ip}->{$user}->{count}++;
+  }
+}
+
+foreach my $key ( sort { $hits->{$b}->{count} <=> $hits->{$a}->{count} } keys(%$hits)) {
+  print "ip=$key | hits=$hits->{$key}->{count}\n";
+}
+
+

@@ -1,0 +1,34 @@
+#!/bin/bash
+
+declare -A IFACE
+declare -A IGNORE
+
+. /etc/network/marcasfw
+
+IFACE=( [arnet]=eth4.1060 [astesano]=eth4.1050 [speedyf]=eth4.1040 [zonanet]=eth4.1070 )
+
+## Vinculos ignorados (0=ignorado)
+IGNORE=( [arnet]=0 [astesano]=1 [speedyf]=1 [zonanet]=1 )
+
+for vinculo in ${VINCULOS[*]} ; do
+
+  [ ${IGNORE[$vinculo]} -eq 0 ] && continue
+
+  ## Si el vinculo está caído, se intenta levantar
+  /sbin/ifconfig ${IFACE[$vinculo]} > /dev/null 2>&1
+  [ $? -eq 0 ] || {
+    /sbin/ifup ${IFACE[$vinculo]} > /dev/null 2>&1
+    sleep 5
+  }
+
+  ## Si el vinculo no levantó, se ignora
+  /sbin/ifconfig ${IFACE[$vinculo]} > /dev/null 2>&1
+  [ $? -eq 0 ] || shift
+
+  /bin/ping -I ${IFACE[$vinculo]} -m ${MARCA[$vinculo]} -c 10 www.google.com.ar > /dev/null 2>&1
+  [ $? -eq 0 ] || {
+    echo "Bajando el vinculo $vinculo (${IFACE[$vinculo]}), no se detecta enlace"
+    /sbin/ifdown ${IFACE[$vinculo]} > /dev/null 2>&1
+  }
+
+done

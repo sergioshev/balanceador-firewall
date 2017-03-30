@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# $Id: ifaceStadistic.script,v 1.1 2011-01-29 14:38:18 aosorio Exp $
+#
+# Script para sacar estadísticas de tráfico por interfaz utilizando el iptraf.
+#
+
+muestreo=${1:-60}
+log_file="/var/log/iptraf/iface_stats_general.log"
+
+iptraf=/usr/sbin/iptraf
+iptraf_options=" -g -B -t $muestreo"
+
+
+>$log_file
+
+$iptraf $iptraf_options
+
+sleep $(( $muestreo*60+10 ))
+
+echo -e "$( date )\n\nEstadistica de carga por interfaz en servidor $(hostname)."
+echo -e "Tiempo de muestreo: $muestreo minuto/s.\n"
+echo 
+
+[ -f "$log_file" ] || {
+  echo "No se encontro el archivo $log_file" 1&>2
+  exit 1
+}
+
+echo La semantica de las columnas de datos
+echo interface uso_promedio uso_pico_maximo
+echo 
+
+cat "$log_file" \
+  | egrep 'eth4.10[45678]0' \
+  | sed -e 's/\(\([0-9]\+\),\([0-9]\+\)\)/\2.\3/g' \
+  | while read data ; do echo -n $(echo $data | cut -f 1 -d : ) ; echo $data \
+  | cut -f 5,6 -d , ; done \
+  | tr -s ' ' \
+  | sort -u -k 1.6,1.9 \
+  | cut -f 1,4,5,8,9 -d ' ' \
+  | { while read line ; do 
+        if echo $line | grep -q 'eth4.1050' ; then 
+          echo $line | sed -e 's/[0-9]\+\([0-9]\{3\}\)\.\([0-9]\{2\}\) kbits\/s$/3\1.\2 kbits\/s/g' 
+        else 
+          echo $line 
+        fi
+      done
+    }
+
+cat <<FFAA
+
+eth4.1040 = Speedy
+eth4.1050 = Astesano
+eth4.1060 = Arnet
+eth4.1080 = Hamber
+FFAA
+

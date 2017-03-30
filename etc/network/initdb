@@ -1,0 +1,10 @@
+create table checks (
+  check_stamp default (datetime('now','localtime')),
+  iface text,
+  status text,
+  primary key (check_stamp, iface) on conflict rollback
+);
+
+
+create index stamp_index on checks (check_stamp);
+create index stamp_iface_index on checks (check_stamp, iface);

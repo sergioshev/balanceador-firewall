@@ -1,0 +1,13 @@
+#!/bin/bash
+#
+# Script que genera las variables de ppp relativas a arnet
+# para elmular un up o down de la ipterface
+
+. /etc/network/marcasfw
+
+export PPP_IPPARAM=${VINCULO[speedyf]}
+export PPP_IFACE=eth4.1040
+#export PPP_IFACE=eth4
+export PPP_LOCAL='192.168.40.15'
+export PPP_REMOTE='192.168.40.1'
+

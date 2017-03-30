@@ -1,0 +1,12 @@
+#!/bin/bash
+#
+# Script que genera las variables de ppp relativas a astesano
+# para elmular un up o down de la ipterface
+
+. /etc/network/marcasfw
+
+export PPP_IPPARAM=${VINCULO[astesano]}
+export PPP_IFACE="eth4.1050"
+export PPP_LOCAL='192.168.50.15'
+export PPP_REMOTE='192.168.50.1'
+

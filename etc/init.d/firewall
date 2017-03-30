@@ -1,0 +1,740 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:		firewall
+# Required-Start:	$network
+# Required-Stop:	
+# Default-Start:	2 3 4 5
+# Default-Stop:		0 1 6
+# Short-Description:	Firewall de Terminal Quequen S.A.
+### END INIT INFO
+#
+# Firewall para Terminal Quequen
+# Autor inicial: Sergio Shevtsov sergioshev@gmail.com
+# 
+# Documentos utilizados
+#   Firewall realizado por Hugo Curti <hcurti@exa.unicen.edu.ar> para Terminal Quequen
+#   Manual de iptables
+#   Documentacion oficial de Netfilter
+#   Articulos de seguridad de Debian
+
+
+LOCK=/var/lock/pppstate.lock
+ESTADO=/var/run/pppstate.defs
+
+# Posible candidato a la lista
+
+my_blacklist="
+8.12.5.142
+14.139.172.112/28
+31.184.192.0/18
+43.255.190.0/24
+58.208.0.0/12
+61.157.0.0/16
+61.160.0.0/16
+61.174.51.192/26
+62.210.128.0/17
+67.20.48.0/20
+70.89.236.160/29
+74.221.128.0/20
+103.41.124.0/24
+112.213.80.0/20
+114.215.0.0/16
+115.230.126.0/24
+115.231.216.0/20
+115.239.228.0/24
+116.0.0.0/8
+117.79.80.0/20
+182.96.0.0/12
+183.0.0.0/8
+186.103.128/17
+191.204/14
+200.76.128/18
+204.124.180.0/22
+211.69.128.0/20
+218.64.0.0/16
+218.65.0.0/17
+218.87.0.0/16
+220.128.64.0/18
+220.128.128.0/18
+220.128.192.0/18
+221.224.0.0/12
+222.160.0.0/14
+222.184.0.0/12
+103.7.229.9
+172.20.1.97
+172.20.1.98
+218.84.132.66
+"
+
+if ! [ -r /etc/network/marcasfw ] ; then
+  echo "No existe la definición de marcas /etc/network/marcasfw. Abortado." \
+    >&2
+  exit 1
+fi
+
+. /etc/network/marcasfw
+
+[ -r /var/run/vinculo.status ] && VSTATUS=$(cat /var/run/vinculo.status) || \
+  VSTATUS=todos
+
+if [ -r $ESTADO ] ; then
+  lockfile -2 -l 120 $LOCK && . $ESTADO
+  rm -f $LOCK
+fi
+
+DMZ_PREFIX="192.168.0"
+DMZ_IFACE="eth2"
+LAN_IFACE="eth0"
+LOOPBACK='127.0.0.1'
+LAN_PREFIX='192.168.1'
+PROV_IFACE=""
+
+xt_recent_dir="/proc/net/xt_recent"
+xt_recent_backup_dir="/var/run"
+
+xt_recent_lists=(
+  nasty2ssh
+  toonasty2ssh
+  toonasty2ssh_candidates
+  nasty2imap
+)
+
+function xt_recent_dump {
+  for l in ${xt_recent_lists[@]} ; do
+    if [ -r "$xt_recent_dir/$l" ] ; then
+      cat "$xt_recent_dir/$l"  | sed -e 's/src=\(\S\+\).*oldest_pkt:\s\+\(\S\+\).*/\1:\2/' > "$xt_recent_backup_dir/$l"
+#      cat "$xt_recent_dir/$l"  | sed -e 's/src=\(\S\+\).*oldest_pkt:\s\+\(\S\+\).*/\1:\2/'
+      echo Hecho el backup de la lista $l
+    fi
+  done
+}
+
+function xt_recent_restore {
+  IFS=':'
+  for l in ${xt_recent_lists[@]} ; do
+    if [ -r "$xt_recent_backup_dir/$l" ] ; then
+      echo Recuperando lista $l
+      cat "$xt_recent_backup_dir/$l"  | while read ip count ; do
+        for (( j=0 ; j<$count ; j++ )) ; do
+#          echo echo \"+$ip\" \> \"$xt_recent_dir/$l\"
+          echo "+$ip" > "$xt_recent_dir/$l"
+        done
+      done
+    fi
+  done
+}
+
+iptables() {
+  echo "iptables $*" 1>&2
+  /sbin/iptables $*
+}
+
+function getActiveProvIface()
+{
+  for vinculo in ${VINCULOS[*]} ; do
+    echo procesando $vinculo
+    iface_vinculo=${PPP_IF[${VINCULO[$vinculo]}]}
+    if [ ! "${iface_vinculo}x" == "x" ] ; then
+      PROV_IFACE="$PROV_IFACE ${iface_vinculo}"
+    fi
+  done
+  echo interfaces de internet ${PROV_IFACE[*]} 
+}
+
+# Retorna el id del vinculo final.
+# Por vinculo final se entiende el prime vinculo levantado segun la tabla de 
+# FALLBACK. Si ningun vinculo esta levantado entonces retorna el pasado por parametro.
+# Si esta activada la opcion NOFALLBACK no hace busquedas del vinculo por medio de la 
+# tabla de FALLBACK retornando el paramentro de entrada.
+# Espera el id del vinculo (NO el nombre)
+
+function vinculo_final
+{
+  final=$1
+  if [ "x${PPP_IF[$final]}" = "x" -a $NOFALLBACK -eq 0 ] ; then
+    for vinculo_fallback in ${FALLBACK[$final]} ; do
+      if [ "x${PPP_IF[$vinculo_fallback]}" != "x" ] ; then
+        final=$vinculo_fallback
+	break
+      fi
+    done
+  fi
+  echo $final
+}
+
+function balanceoYControl
+{
+
+  # RECOLECCION DE ESTADISTICAS
+
+  # Se levantan estadísticas sobre todos los vinculos, para hacer un 
+  # balanceo basado en la estimación de consumo de ancho de banda.
+  for vinculo in ${VINCULOS[*]} ; do
+    if [ "x${PPP_IF[${VINCULO[$vinculo]}]}" != "x" ] ; then
+      iptables -t mangle -i ${PPP_IF[${VINCULO[$vinculo]}]} -A PREROUTING \
+               -j RATEEST --rateest-name $vinculo \
+               --rateest-interval 50ms --rateest-ewma 0.2s
+    fi
+  done
+
+
+  # RUTEO BALANCEADO SEGUN DISPONIBILIDAD DE TRAFICO ENTRANTE ENTRE LOS VINCULOS
+
+  # Todo paquete que ingresa por alguna de las interfaces externas e inicia
+  # una conexion debe protegerse para evitar que el balanceo mande la salida
+  # hacia otro lado. Para esto se utilizan las marcas fuertes de conexión,
+  # que se establecerán para todo paquete entrante que inicia conexión.
+
+  for vinculo in ${VINCULOS[*]} ; do
+    # echo "por verse $vinculo -> ${PPP_IF[${VINCULO[$vinculo]}]} -> ${MARCA[$vinculo]}" >&2
+    if [ "x${PPP_IF[${VINCULO[$vinculo]}]}" != "x" ] ; then
+      # echo "evaluando $vinculo -> ${PPP_IF[${VINCULO[$vinculo]}]} -> ${MARCA[$vinculo]}" >&2
+      iptables -t mangle -A PREROUTING -m conntrack --ctstate NEW,INVALID \
+        -i ${PPP_IF[${VINCULO[$vinculo]}]} -j CONNMARK \
+        --set-mark ${MARCA[$vinculo]}
+
+      iptables -t mangle -A PREROUTING -m connmark --mark ${MARCA[$vinculo]} \
+        -j MARK --set-mark ${MARCA[$vinculo]}
+
+      iptables -t mangle -A PREROUTING -m mark --mark ${MARCA[$vinculo]} \
+          -j ACCEPT
+    fi
+  done
+
+  for cadena in PREROUTING OUTPUT ; do
+    iptables  -t  mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+      -p tcp --dport 443 -j CONNMARK --set-mark ${BALANCE[especial]}
+
+    iptables  -t  mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+      -p tcp --dport 25 -s ${DMZ_PREFIX}.0/24 -j CONNMARK --set-mark ${BALANCE[especial]}
+
+#      -p tcp --dport 25 -s ${DMZ_PREFIX}.0/16 -j CONNMARK --set-mark ${BALANCE[speedyf]}
+
+#    iptables  -t  mangle  -A $cadena -m connmark --mark ${BALANCE[speedyf]} \
+#      -j MARK --set-mark ${BALANCE[speedyf]}
+#
+#    iptables  -t  mangle  -A $cadena -m mark --mark ${BALANCE[speedyf]} \
+#      -j ACCEPT
+
+    iptables  -t  mangle  -A $cadena -m connmark --mark ${BALANCE[especial]} \
+      -j MARK --set-mark ${BALANCE[especial]}
+
+    iptables  -t  mangle  -A $cadena -m mark --mark ${BALANCE[especial]} \
+      -j ACCEPT
+  done
+
+  # Por un torneo de eliminación se determina por qué lugar pasará cada
+  # conexión nueva, en función de la cantidad de vínculos actualmente en uso.
+  # esto se decide combinando los deseos del administrador con la lista
+  # de vinculos activos en el momento de la incialización de estas reglas.
+
+  declare -a VINCULOS_USADOS
+
+  for vinculo in arnet astesano speedyf ; do
+    v_final=$(vinculo_final ${VINCULO[$vinculo]})
+    nombre_v_final=$(obtener_nombre_vinculo $v_final)
+    echo "vinculo=$vinculo v_final=$v_final , nombre_v_final=$nombre_v_final"
+    if [ "x${PPP_IF[$v_final]}" != "x" -a \
+         "$VSTATUS" != "n${nombre_v_final}" -a \
+         \( "$VSTATUS" = "emergencia" -o \
+            "$VSTATUS" = "todos" -o \
+	    "$VSTATUS" = "${nombre_v_final}" -o \
+            "${VSTATUS:0:1}" = "n" \) ] ; then
+      if ! echo ${VINCULOS_USADOS[*]} | egrep -q "(^| )$nombre_v_final( |$)" ; then
+        VINCULOS_USADOS+=($nombre_v_final)
+      fi
+    fi
+  done
+  echo "Detectamos los vinculos: ${VINCULOS_USADOS[*]}" >&2
+
+  case ${#VINCULOS_USADOS[*]} in
+    4)
+      iptables -t mangle -N gana1
+      iptables -t mangle -N gana2
+      iptables -t mangle -N gana3
+      for cadena in PREROUTING OUTPUT ; do
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -j CONNMARK --set-mark ${BALANCE[${VINCULOS_USADOS[0]}]}
+
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[1]} \
+          --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[1]}]} --rateest-gt \
+          --rateest2  ${VINCULOS_USADOS[2]} \
+          --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[2]}]} -j gana1
+
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[2]} \
+          --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[2]}]} --rateest-gt \
+          --rateest2  ${VINCULOS_USADOS[3]} \
+          --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[3]}]} -j gana2
+        iptables -t mangle -A $cadena -j gana3 
+      done
+      # armo la tabla gana1
+      iptables -t mangle  -A gana1 -m conntrack --ctstate NEW,INVALID \
+        -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[3]} \
+        --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[3]}]} --rateest-gt \
+        --rateest2  ${VINCULOS_USADOS[1]} \
+        --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[1]}]} -j gana3
+      iptables -t mangle  -A gana1 \
+        -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[1]} \
+        --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[1]}]} --rateest-gt \
+        --rateest2  ${VINCULOS_USADOS[0]} \
+        --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+        --set-mark ${BALANCE[${VINCULOS_USADOS[1]}]}
+      iptables -t mangle -A gana1 -j CONNMARK --restore-mark
+      iptables -t mangle -A gana1 -j ACCEPT
+
+      #armo la tabla gana2
+      iptables -t mangle  -A gana2 \
+        -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[2]} \
+        --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[2]}]} --rateest-gt \
+        --rateest2  ${VINCULOS_USADOS[0]} \
+        --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+        --set-mark ${BALANCE[${VINCULOS_USADOS[2]}]}
+      iptables -t mangle -A gana2 -j CONNMARK --restore-mark
+      iptables -t mangle -A gana2 -j ACCEPT
+     
+      #armo la tabla gana3
+      iptables -t mangle  -A gana3 \
+        -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[3]} \
+        --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[3]}]} --rateest-gt \
+        --rateest2  ${VINCULOS_USADOS[0]} \
+        --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+        --set-mark ${BALANCE[${VINCULOS_USADOS[3]}]}
+      iptables -t mangle -A gana3 -j CONNMARK --restore-mark
+      iptables -t mangle -A gana3 -j ACCEPT
+
+    ;;
+    3)
+      iptables -t mangle -N gana1
+      for cadena in PREROUTING OUTPUT ; do
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -j CONNMARK --set-mark ${BALANCE[${VINCULOS_USADOS[0]}]}
+
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[1]} \
+          --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[1]}]} --rateest-gt \
+          --rateest2  ${VINCULOS_USADOS[2]} \
+	  --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[2]}]} -j gana1
+      done
+
+      iptables -t mangle  -A gana1 \
+        -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[1]} \
+        --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[1]}]} --rateest-gt \
+        --rateest2  ${VINCULOS_USADOS[0]} \
+        --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+        --set-mark ${BALANCE[${VINCULOS_USADOS[1]}]}
+
+      iptables -t mangle -A gana1 -j CONNMARK --restore-mark
+
+      iptables -t mangle -A gana1 -j ACCEPT
+
+      for cadena in PREROUTING OUTPUT ; do
+        iptables -t mangle -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[2]} \
+          --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[2]}]} --rateest-gt \
+          --rateest2  ${VINCULOS_USADOS[0]} \
+          --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+          --set-mark ${BALANCE[${VINCULOS_USADOS[2]}]}
+
+        iptables -t  mangle -A $cadena -j CONNMARK --restore-mark
+      done
+      ;;
+
+    2)
+      echo ${VINCULOS_USADOS[*]}
+      for cadena in PREROUTING OUTPUT ; do
+        iptables -t mangle  -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -j CONNMARK --set-mark ${BALANCE[${VINCULOS_USADOS[0]}]}
+
+        iptables -t mangle -A $cadena -m conntrack --ctstate NEW,INVALID \
+          -m rateest --rateest-delta --rateest1 ${VINCULOS_USADOS[1]} \
+          --rateest-bps1 ${LIMITES[${VINCULOS_USADOS[1]}]} --rateest-gt \
+          --rateest2  ${VINCULOS_USADOS[0]} \
+          --rateest-bps2 ${LIMITES[${VINCULOS_USADOS[0]}]} -j CONNMARK \
+          --set-mark ${BALANCE[${VINCULOS_USADOS[1]}]}
+
+        iptables -t  mangle -A $cadena -j CONNMARK --restore-mark
+      done
+      ;;
+  esac
+
+}
+
+# permitir trafico desde DMZ hacia inet
+# $1 - port
+# $2 - proto
+function DMZ2inet()
+{
+  for prov in $PROV_IFACE ; do
+    iptables -t filter -A FORWARD -p $2 -i $DMZ_IFACE -o $prov --dport $1 -j ACCEPT
+  done
+}
+
+# permitir trafico desde DMZ hacia lan
+# $1 - port
+# $2 - proto
+# $3 - dst port
+function DMZ2lan()
+{
+  iptables -t filter -A FORWARD -p $2 -i $DMZ_IFACE -o $LAN_IFACE --dport $1 -j ACCEPT
+}
+
+
+function flushRules()
+{
+  echo "Haciendo dump de xt_recent [${xt_recent_lists[@]}]"
+  xt_recent_dump
+  echo Vaciando todas las cadenas...
+  iptables -F INPUT
+  iptables -F FORWARD
+  iptables -F OUTPUT
+  iptables -t nat -F POSTROUTING
+  iptables -t nat -F PREROUTING
+  echo Aplicando politicas por defecto...
+  iptables -P FORWARD ACCEPT
+  iptables -P INPUT ACCEPT
+  echo Eliminando filtro de ips locales...
+  iptables -F LAN_FILTER
+  iptables -X LAN_FILTER
+  echo Eliminando cadena ADD_BAD_IP...
+  iptables -F ADD_BAD_IP
+  iptables -X ADD_BAD_IP
+  echo Eliminando reglas de balanceo y reformateo de paquetes...
+  iptables -t mangle -F
+  iptables -t mangle -X
+}
+
+
+function setupLocalIpAccessFilter
+{
+  black_from_ip="${LAN_PREFIX}.50"
+  black_to_ip="${LAN_PREFIX}.90"
+  echo "    "Filtro por IP: Creando filtro de acceso por ip...
+  iptables -N LAN_FILTER
+  echo "    "Abriendo acceso al squid para el rango ${LAN_PREFIX}.53-90
+  iptables -A LAN_FILTER -p tcp -m iprange --src-range $black_from_ip-$black_to_ip -d ${LAN_PREFIX}/16 --dport 3128 -j ACCEPT
+  
+  echo "    "Filtro por IP/MAC: Bloqueando nodos del embarque.
+  iptables -A LAN_FILTER -p tcp --dport 25 -d ${LAN_PREFIX}.0/16 -m mac --mac-source e0:69:95:3b:e9:aa -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 25 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 00:50:04:13:c4:b8 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 25 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 7c:05:07:0e:9b:16 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp --dport 587 -d ${LAN_PREFIX}.0/16 -m mac --mac-source e0:69:95:3b:e9:aa -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 587 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 00:50:04:13:c4:b8 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 587 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 7c:05:07:0e:9b:16 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp --dport 143 -d ${LAN_PREFIX}.0/16 -m mac --mac-source e0:69:95:3b:e9:aa -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 143 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 00:50:04:13:c4:b8 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 143 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 7c:05:07:0e:9b:16 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source e0:69:95:3b:e9:aa -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 00:50:04:13:c4:b8 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 7c:05:07:0e:9b:16 -j ACCEPT
+
+  iptables -A LAN_FILTER -p udp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source e0:69:95:3b:e9:aa -j ACCEPT
+  iptables -A LAN_FILTER -p udp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 00:50:04:13:c4:b8 -j ACCEPT
+  iptables -A LAN_FILTER -p udp --dport 53 -d ${LAN_PREFIX}.0/16 -m mac --mac-source 7c:05:07:0e:9b:16 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp -m mac --mac-source e0:69:95:3b:e9:aa -j REJECT
+  iptables -A LAN_FILTER -p tcp -m mac --mac-source 00:50:04:13:c4:b8 -j REJECT
+  iptables -A LAN_FILTER -p tcp -m mac --mac-source 7c:05:07:0e:9b:16 -j REJECT
+
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.69 -j REJECT
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.71 -j REJECT
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.118 -j REJECT
+
+  echo "    "Filtro por IP: Estableciendo bloqueo desde $black_from_ip hasta $black_to_ip...
+  #iptables -A LAN_FILTER -m iprange --src-range $black_from_ip-$black_to_ip -j LOG --log-uid
+  iptables -A LAN_FILTER -m iprange --src-range $black_from_ip-$black_to_ip -j REJECT
+
+  echo "    "Filtro por IP: Cerrando el trafico de la vm de pcvigilancia vm
+  iptables -A LAN_FILTER -p tcp -s 192.168.1.101 -j REJECT
+
+  echo "    "Filtro por IP: Bloquendo nodos de Incendio
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.152 -d ${LAN_PREFIX}.0/16 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.153 -d ${LAN_PREFIX}.0/16 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.152 -j REJECT
+  iptables -A LAN_FILTER -p tcp -s ${LAN_PREFIX}.153 -j REJECT
+  echo "    "Cerrando trafico SMTP dirigido hacia afuera...
+
+  # habilito la salida del puerto 25 pcsistemas
+  iptables -A LAN_FILTER -p tcp --dport 25 -d 0.0.0.0/0 -i $LAN_IFACE -s ${LAN_PREFIX}.154 -j ACCEPT
+
+  # taboada
+  iptables -A LAN_FILTER -d 0.0.0.0/0 -i $LAN_IFACE -s ${LAN_PREFIX}.134 -j ACCEPT
+  iptables -A LAN_FILTER -d 0.0.0.0/0 -i $LAN_IFACE -s ${LAN_PREFIX}.127 -j ACCEPT
+  iptables -A LAN_FILTER -d 0.0.0.0/0 -i $LAN_IFACE -s ${LAN_PREFIX}.173 -j ACCEPT
+  iptables -A LAN_FILTER -d 0.0.0.0/0 -i $LAN_IFACE -s ${LAN_PREFIX}.174 -j ACCEPT
+
+
+  iptables -A LAN_FILTER -p tcp --dport 25 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.17 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 110 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.17 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp --dport 25 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.173-j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 110 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.173 -j ACCEPT
+
+  iptables -A LAN_FILTER -p tcp --dport 25 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.174 -j ACCEPT
+  iptables -A LAN_FILTER -p tcp --dport 110 -d 0.0.0.0/0 -i $LAN_IFACE -s 192.168.1.174 -j ACCEPT
+  # fin taboada
+
+
+  for prov in $PROV_IFACE ; do
+    iptables -A LAN_FILTER -p tcp -s "${LAN_PREFIX}.0/24" -i $LAN_IFACE -o $prov ! -d "${LAN_PREFIX}.0/16" --dport 25 -j REJECT
+  done
+}
+
+function dnat_all_public_ips()
+{
+  for vinculo in ${VINCULOS[*]} ; do
+    # esta definido, supuestamente ese vinculo esta levantado por pppd
+    echo DNAT para $vinculo
+    ip_vinculo=${PPP_IPL[${VINCULO[$vinculo]}]}
+    iface_vinculo=${PPP_IF[${VINCULO[$vinculo]}]}
+    if [ ! "${ip_vinculo}x" == "x" ] ; then
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 80 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.195
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 143 -d $ip_vinculo -j DNAT --to-destination ${DMZ_PREFIX}.101
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 25 -d $ip_vinculo -j DNAT --to-destination ${DMZ_PREFIX}.102
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 587 -d $ip_vinculo -j DNAT --to-destination ${DMZ_PREFIX}.102
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 443 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.195
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1707 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.6:22
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1708 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.195:22
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1709 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.154:22
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1929 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.34:554 ## Puerto de RTSP para cámaras
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1930 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.34:80 ## Puerto de HTTP para cámaras
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1931 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.31:80 ## Cámara prefectura
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1932 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.32:80 ## Cámara calado
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1933 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.33:80 ## Cámara bruto
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1934 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.130:80 ## Cámara domo seguridad
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1935 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.46:80 ## Cámara domo seguridad
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1940 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.2:5900 ## VNC de Discovery
+      iptables -t nat -A PREROUTING -p tcp -i $iface_vinculo --dport 1941 -d $ip_vinculo -j DNAT --to-destination ${LAN_PREFIX}.157:80 ## Apache de pcvirtual-2
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.195 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 143 -d ${DMZ_PREFIX}.101 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 25 -d ${DMZ_PREFIX}.102 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 587 -d ${DMZ_PREFIX}.102 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 443 -d ${LAN_PREFIX}.195 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 22 -d ${LAN_PREFIX}.6 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 22 -d ${LAN_PREFIX}.195 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 22 -d ${LAN_PREFIX}.154 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 19999 -d ${LAN_PREFIX}.154 -j ACCEPT
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 554 -d ${LAN_PREFIX}.34 -j ACCEPT ## Puerto de RTSP para cámaras
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.31 -j ACCEPT ## Puerto de HTTP para cámara prefectura
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.32 -j ACCEPT ## Puerto de HTTP para cámara calado
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.33 -j ACCEPT ## Puerto de HTTP para cámara bruto
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.34 -j ACCEPT ## Puerto de HTTP para cámaras
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.130 -j ACCEPT ## Puerto de HTTP para cámara domo seguridad
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.46 -j ACCEPT ## Puerto de HTTP para cámara domo porton
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 5900 -d ${LAN_PREFIX}.2 -j ACCEPT ## VNC de Discovery
+      iptables -t filter -A FORWARD -p tcp -i $iface_vinculo --dport 80 -d ${LAN_PREFIX}.157 -j ACCEPT ## Apache de pcvirtual-2
+    fi
+  done
+}
+
+
+function setUpRules()
+{
+  setupLocalIpAccessFilter
+
+  echo Habilitando ping a Hamber...
+  iptables -t filter -A INPUT -s 172.20.1.97 -p icmp -j ACCEPT
+  iptables -t filter -A INPUT -s 172.20.1.98 -p icmp -j ACCEPT
+
+
+  echo Aplicando lista negra...
+  for i in $my_blacklist ; do 
+    for prov in $PROV_IFACE ; do
+      echo Bloqueando : $i sobre $prov
+      iptables -t filter -A INPUT -i $prov -s $i -j REJECT 
+  #    iptables -t filter -A FORWARD -i $prov -s $i -j REJECT 
+    done
+  done
+  
+  # dejar pasar el trafico de las conexione iniciadas
+  echo Permitiendo trafico de las conexiones iniciadas...
+  iptables -t filter -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+  iptables -t filter -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+  echo Prevencion de ataques de diccionario a SSH
+  iptables -t filter -N ADD_BAD_IP
+  iptables -t filter -A ADD_BAD_IP -j LOG --log-prefix _BANNED_
+
+  for prov in $PROV_IFACE ; do
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --name nice2ssh --rcheck -j ACCEPT
+
+  # La lista toonasty2ssh es el segundo nivel de prevencion de ataques de diccionario.
+  # Si una ip cae en toonasty2ssh es penalizada permanentemente o hasta que se vacie la 
+  # lista en forma manual. Para caer en la lista toonasty2ssh se tienen que realizar 10
+  # conexiones a ssh durante una semana (604800seg)
+  # IMPORTANTE: para trabajar con ssh una vez conectado agregar la ip origen a la lista
+  # blanca de ssh (nice2ssh) de la sig. manera: /etc/init.d/firewall nice2ssh <IP> para 
+  # no caer eventualmente en la lista permanente.
+
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --rcheck --name toonasty2ssh -j LOG --log-prefix _BLOCKED_
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --rcheck --name toonasty2ssh -j DROP
+    iptables -t filter -A ADD_BAD_IP -i $prov -m recent --set --name toonasty2ssh
+    iptables -t filter -A ADD_BAD_IP -i $prov -j DROP
+
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --set --name toonasty2ssh_candidates
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --name toonasty2ssh_candidates \
+      --rcheck --hitcount 10 --seconds 604800 -j ADD_BAD_IP
+
+  # Corta rafagas de ataques
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --set --name nasty2ssh
+    iptables -t filter -A INPUT -p tcp --dport 22 -i $prov -m state --state NEW -m recent --name nasty2ssh --update \
+      --seconds 1200 --hitcount 4 -j ADD_BAD_IP
+ #    --seconds 1200 --hitcount 4 -j DROP
+  done
+
+  echo Prevencion de ataques de diccionario a IMAP
+  for prov in $PROV_IFACE ; do 
+    iptables -t filter -A INPUT -p tcp --dport 143 -i $prov -m state --state NEW -m recent --name nasty2imap --set
+    iptables -t filter -A INPUT -p tcp --dport 143 -i $prov -m state --state NEW -m recent --name nasty2imap --update \
+      --seconds 600 --hitcount 4 -j DROP
+  done
+
+  echo Aplicando Masquerading para salida a internet...
+  for vinculo in ${VINCULOS[*]} ; do
+    if [ "x${PPP_IF[${VINCULO[$vinculo]}]}" != "x" ] ; then
+        iptables -t nat -A POSTROUTING -o ${PPP_IF[${VINCULO[$vinculo]}]} \
+          -j SNAT --to-source ${PPP_IPL[${VINCULO[$vinculo]}]}
+    fi
+  done
+
+  echo Ajustando el MSS para el vinculo de internet ppp
+  iptables -o ppp+ -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN \
+      -m tcpmss --mss 1400:1536 -j TCPMSS --set-mss 1452
+
+  echo Abriendo protocolo icmp
+  iptables -t filter -A FORWARD -p icmp -j ACCEPT
+  iptables -t filter -A INPUT -p icmp -j ACCEPT
+
+  #echo Aplicando filtro al trafico de paso.
+  #iptables -t filter -A FORWARD -i $LAN_IFACE -j LAN_FILTER
+
+  # hacer DNAT a todos los puertos necesarios para acceder los servicios
+  # desde inet a DMZ
+  # --to-destination va a tener que estar acorde con los valores para el 
+  # cluster. dado que se accedera al servicio por ip. para cada servicio una 
+  # ip virtual.
+
+  echo Haciendo DNAT de todos los puertos usados desde inet...
+  dnat_all_public_ips
+
+  echo Abriendo puertos de DMZ hacia internet
+  #DMZ2inet 80 tcp # no hace falta por el proxy transparente
+  DMZ2inet 25 tcp
+  DMZ2inet 123 tcp # ntpd
+  DMZ2inet 123 udp # ntpd
+
+  echo Estableciendo reglas web proxy transparente
+  # conectar las peticiones a los reportes de squid + sarg + proxy transparente al apache local
+  for prov in $PROV_IFACE ; do
+    iptables -t nat -A PREROUTING -p tcp -i $prov --dport 10443 -j DNAT --to-destination 192.168.0.1
+  done
+  iptables -t nat -A PREROUTING -p tcp -s 192.168.0.0/16 --dport 10443 -j DNAT --to-destination 192.168.0.1
+
+  # Se pone explicitamente la ip de destino, debido a que REDIRECT usa la ip 192.168.100.200 que es un 
+  # alias. Esto hace que las respuestas no llegan al origen.
+  #iptables -t nat -A PREROUTING -p tcp -s 192.168.0.0/16 --dport 80 -j REDIRECT --to-ports 3128
+  iptables -t nat -A PREROUTING -p tcp -s 192.168.1.0/24 --dport 80 -j DNAT --to-destination 192.168.1.1:3128
+  iptables -t nat -A PREROUTING -p tcp -s 192.168.0.0/24 --dport 80 -j DNAT --to-destination 192.168.0.1:3128
+
+  echo Cerrando DMZ hacia la lan
+  DMZ2lan 113 tcp
+  DMZ2lan 9102 tcp
+  DMZ2lan 9103 tcp
+  DMZ2lan 80 tcp
+  DMZ2lan 53 tcp
+  DMZ2lan 53 udp
+  DMZ2lan 22 tcp
+  DMZ2lan 389 tcp
+  DMZ2lan 139 tcp
+  DMZ2lan 445 tcp
+
+  # temporal pc de playa generan mucho trafico hacia afuera
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.92 ! -d 192.168.0.0/16 -j REJECT
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.96 ! -d 192.168.0.0/16 -j REJECT
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.135 ! -d 192.168.0.0/16 -j REJECT
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.137 ! -d 192.168.0.0/16 -j REJECT
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.106 ! -d 192.168.0.0/16 -j REJECT
+  #iptables -I FORWARD 1 -p tcp -s 192.168.1.126 ! -d 192.168.0.0/16 -j REJECT
+  # fin temporal
+
+  iptables -t filter -A FORWARD -i $DMZ_IFACE -o $LAN_IFACE -j REJECT
+
+  echo Aplicando filtro al trafico de paso.
+  iptables -t filter -A FORWARD -i $LAN_IFACE -j LAN_FILTER
+
+  echo Abriendo salida desde lan hacia dmz e inet
+  iptables -t filter -A FORWARD -i $LAN_IFACE -j ACCEPT
+
+  echo Abriendo el puerto 10443 apache local.
+  iptables -t filter -A INPUT -p tcp --dport 10443 -j ACCEPT
+  # abriendo puertos al gateway
+  echo Abriendo puertos de SSH en el gateway
+  iptables -t filter -A INPUT -p tcp -m multiport --ports 22 -j ACCEPT
+
+  echo Abriendo puertos DNS
+  iptables -t filter -A INPUT -p tcp -m multiport --ports 53 -j ACCEPT
+  iptables -t filter -A INPUT -p udp -m multiport --ports 53 -j ACCEPT
+
+  echo Abriendo entrada al gateway desde la lan y dmz segun filtro de IPs
+#  iptables -t filter -A INPUT -i $LAN_IFACE -j LAN_FILTER
+  iptables -t filter -A INPUT -p all -s $LOOPBACK -j ACCEPT
+  iptables -t filter -A INPUT -p all -s 192.168.0.0/16 -j ACCEPT
+
+
+  # definir politicas reject
+  echo Estableciendo las politicas por defecto a REJECT...
+  iptables -A INPUT -j REJECT
+  for prov in $PROV_IFACE ; do
+    iptables -A FORWARD -i $prov -j REJECT
+  done
+
+  iptables -t nat -I PREROUTING 1 -p tcp -s 192.168.1.154 -j ACCEPT
+  iptables -t nat -I PREROUTING 1 -p tcp -s 192.168.1.134 -j ACCEPT
+  echo "Recuperando desde dump xt_recent [${xt_recent_lists[@]}]"
+  xt_recent_restore
+}
+
+case "$1" in
+  start)
+    #auditip stop
+    getActiveProvIface
+    flushRules
+    balanceoYControl
+    echo "fin balanceo" 1>&2
+    setUpRules 
+    #auditip start
+  ;;
+  stop)
+    flushRules
+    #auditip stop
+  ;;
+  restart)
+    #auditip stop
+    getActiveProvIface
+    flushRules
+    balanceoYControl
+    setUpRules
+    #auditip start
+  ;;
+  nice2ssh)
+    shift
+    ip="$1"
+    echo echo \"+$ip\" \> \"$xt_recent_dir/nice2ssh\"
+    echo echo \"-$ip\" \> \"$xt_recent_dir/toonasty2ssh\"
+    echo echo \"-$ip\" \> \"$xt_recent_dir/nasty2ssh\"
+    echo "+$ip" > "$xt_recent_dir/nice2ssh"
+    echo "-$ip" > "$xt_recent_dir/toonasty2ssh"
+    echo "-$ip" > "$xt_recent_dir/nasty2ssh"
+  ;;
+  drop-nice2ssh)
+    echo "/" > "$xt_recent_dir/nice2ssh"
+  ;;
+  *)
+     echo "Usage: /etc/init.d/firewall {start|stop|restart}"
+     exit 1
+  ;;
+esac

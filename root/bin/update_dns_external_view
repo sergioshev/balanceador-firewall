@@ -1,0 +1,78 @@
+#!/bin/bash
+#
+#  Script para actualizar el la vista externa del dns.
+#  Es idempotente. Tira todos los registros de recurso
+#  para cada ip publica y genera instrucciones para 
+#  nsupdate para agregar las ips actuales.
+#
+#
+exit 0
+ppp_defs="/var/run/pppstate.defs"
+marcas="/etc/network/marcasfw"
+
+key="/etc/bind/Ktq-externa.+157+15674.private"
+
+[ ! -r "${ppp_defs}" -o ! -r "${marcas}" ] && {
+  echo No existe el archivo ${ppp_defs} o ${marcas}
+  exit 1
+}
+
+# borrar todos los registros para las ips publicas
+{ 
+  echo update delete terminalquequen.com.ar IN A
+  echo update delete mx-1.terminalquequen.com.ar IN A
+  echo update delete ns-1.terminalquequen.com.ar IN A
+  echo update delete euro.terminalquequen.com.ar IN A
+  echo update delete ngenio.terminalquequen.com.ar IN A
+  echo update delete www.terminalquequen.com.ar IN A
+} > instrucciones_borrado
+
+
+. "$ppp_defs"
+. "$marcas"
+
+{ 
+  echo server localhost
+  for vinculo in ${VINCULOS[*]} ; do
+    iface=${PPP_IF[${VINCULO[$vinculo]}]}
+    #if [ $vinculo == "zonanet" -o $vinculo == "astesano" ] ; then
+    case $vinculo in 
+    astesano)
+      ip_vinculo="200.80.247.40"
+    ;;
+    arnet)
+      ip_vinculo="186.109.87.81"
+    ;;
+    speedyf)
+      ip_vinculo="201.251.127.54"
+    ;;
+    esac
+    if [ $vinculo == "hamber" ] ; then
+      continue
+    fi
+    if [ ! "${iface}x" == "x" ] ; then
+      peso_vinculo=${DDNS[$vinculo]}
+      for i in $(seq 1 $peso_vinculo) ; do
+        echo update add terminalquequen.com.ar 300 IN A $ip_vinculo
+        echo update add mx-1.terminalquequen.com.ar 300 IN A $ip_vinculo
+        echo update add ns-1.terminalquequen.com.ar 300 IN A $ip_vinculo 
+        echo update add euro.terminalquequen.com.ar 300 IN A $ip_vinculo 
+        echo update add ngenio.terminalquequen.com.ar 300 IN A $ip_vinculo 
+        echo update add www.terminalquequen.com.ar 300 IN A $ip_vinculo
+      done
+    fi
+  done
+} > instrucciones_alta
+
+{ 
+  echo server localhost
+  cat instrucciones_borrado instrucciones_alta 
+  echo send 
+} > /var/log/nsupdate_last_exec
+
+{ 
+  echo server localhost
+  cat instrucciones_borrado instrucciones_alta 
+  echo send 
+} | nsupdate -k "$key"
+#rm -f instrucciones_borrado instrucciones_alta

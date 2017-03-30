@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# $Id: marcasfw.euro,v 1.2 2012-03-15 04:42:31 hcurti Exp $
+#
+# Marcas de firewall utilizadas por vinculo y firewall.
+
+declare -A MARCA
+declare -A BALANCE
+declare -A VINCULO
+declare -A LIMITES
+
+declare -A DDNS
+
+MARCA=( [astesano]=17 [speedyf]=16 [arnet]=18 [main]=17 [hamber]=19 )
+
+BALANCE=( [astesano]=33 [speedyf]=32 [arnet]=34 [hamber]=35 [main]=33 [especial]=64 )
+
+LIMITES=( [arnet]=4mbit [speedyf]=1mbit [astesano]=4mbit [hamber]=1mbit )
+
+DDNS=( [arnet]=1 [speedyf]=1 [astesano]=1 [hamber]=1 )
+
+# La tabla main corresponde a la conexión de astesano
+
+VINCULO=( [astesano]=1 [speedyf]=0 [arnet]=2 [hamber]=3 [main]=1 )
+
+VINCULOS=(arnet speedyf astesano hamber )
+
+# Matriz de fallback. Se utiliza para elegir las rutas en caso de ausencia
+# de vinculos. El número corresponde al vínculo indicado arriba.
+# Se probará una por una la presencia de cada vínculo y en caso de no existir
+# ninguno se dejará en blanco (para la ruta de concentrador) o se mandará a
+# unreachable (para la ruta por defecto).
+
+declare -a FALLBACK
+FALLBACK[1]="1 2 0 3"
+FALLBACK[0]="0 1 2 3"
+FALLBACK[2]="2 1 0 3"
+FALLBACK[3]="3 1 2 0"
+
+# Suprimir el comportamiento de fallback, respetar estrictamente los deseos del
+# administrador.
+# 0 no suprimir
+# 1 suprimir
+NOFALLBACK=0
+
+
+function obtener_nombre_vinculo
+{
+  id=$1
+  nombre=''
+  for vinculo in ${VINCULOS[*]} ; do
+    if [ "${VINCULO[$vinculo]}" -eq $id ] ; then
+      nombre=$vinculo
+    fi
+  done
+  echo $nombre
+}
+

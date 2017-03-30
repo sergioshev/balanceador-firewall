@@ -1,0 +1,38 @@
+#!/bin/bash
+#  Hace dump de las lista xt_recent para restaurar luego
+#  de que una interfaz se baja o levanta
+xt_recent_dir="/proc/net/xt_recent"
+xt_recent_backup_dir="/var/run"
+
+xt_recent_lists=(
+  nasty2ssh
+  toonasty2ssh
+  nasty2imap
+)
+
+
+function do_dump {
+  for l in ${xt_recent_lists[@]} ; do 
+    cat "$xt_recent_dir/$l"  | sed -e 's/src=\(\S\+\).*/\1/' > "$xt_recent_backup_dir/$l"
+  done
+}
+
+function do_restore {
+  for l in ${xt_recent_lists[@]} ; do 
+    cat "$xt_recent_backup_dir/$l"  | while read ip ; do 
+      echo "echo \"+$ip\" > \"$xt_recent_dir/$l\""
+      echo "+$ip" > "$xt_recent_dir/$l"
+    done 
+  done
+}
+
+case $1 in 
+  do-dump)
+    echo "Haciendo dump de xt_recent [${xt_recent_lists[@]}]"
+    do_dump
+  ;;
+  do-restore)
+    echo "Recuperando desde dump xt_recent [${xt_recent_lists[@]}]"
+    do_restore
+  ;;
+esac

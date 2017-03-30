@@ -1,0 +1,109 @@
+## This file describes the network interfaces available on your system
+## and how to activate them. For more information, see interfaces(5).
+#
+## The loopback network interface
+auto lo
+iface lo inet loopback
+#
+## The primary network interface
+
+# Lan
+auto eth0
+iface eth0 inet static
+  address 192.168.1.1
+  netmask 255.255.255.0
+  network 192.168.1.0
+  broadcast 192.168.1.255
+
+# Temporal para acceder a los vinculos de calado muleto
+auto eth0:1
+iface eth0:1 inet static
+  address 192.168.100.200
+  netmask 255.255.255.0
+  network 192.168.100.0
+  broadcast 192.168.100.255
+
+
+# Dmz
+auto eth2
+iface eth2 inet static
+#  address 192.168.0.2
+  address 192.168.0.1
+  netmask 255.255.255.0
+  network 192.168.0.0
+  broadcast 192.168.0.255
+#  up ip route add 192.168.2.0/24 dev eth2
+#  down ip route del 192.168.2.0/24 dev eth2
+
+#auto eth4
+#iface eth4 inet static
+#  address 192.168.40.15
+#  netmask 255.255.255.0
+#  network 192.168.40.1
+#  up /root/bin/vinculo_up_down up speedyf
+#  down /root/bin/vinculo_up_down down speedyf
+#
+
+# Interface para acceder al mikrotik
+ 
+auto eth4.1000
+iface eth4.1000 inet static
+  address 192.168.90.10
+  netmask 255.255.255.0
+  network 192.168.90.0
+  broadcast 192.168.90.255
+
+## Troncal al microtik
+auto eth4
+iface eth4 inet static
+  up vconfig add eth4 1000
+  up vconfig add eth4 1040
+  up vconfig add eth4 1050
+  up vconfig add eth4 1060
+  up vconfig add eth4 1080
+  down vconfig rem eth4.1000
+  down vconfig rem eth4.1040
+  down vconfig rem eth4.1050
+  down vconfig rem eth4.1060
+  down vconfig rem eth4.1080
+
+
+# speedy
+auto eth4.1040
+iface eth4.1040 inet static
+  address 192.168.40.15
+  netmask 255.255.255.0
+  network 192.168.40.1
+  up /root/bin/vinculo_up_down up speedyf
+  down /root/bin/vinculo_up_down down speedyf
+
+# astesano
+auto eth4.1050
+iface eth4.1050 inet static
+  address 192.168.50.15
+  netmask 255.255.255.0
+  network 192.168.50.1
+  up /root/bin/vinculo_up_down up astesano
+  down /root/bin/vinculo_up_down down astesano
+
+# arnet
+auto eth4.1060
+iface eth4.1060 inet static
+  address 192.168.60.15
+  netmask 255.255.255.0
+  network 192.168.60.1
+  up /root/bin/vinculo_up_down up arnet
+  down /root/bin/vinculo_up_down down arnet
+
+# hamber
+auto eth4.1080
+iface eth4.1080 inet static
+  address 172.19.1.20
+  netmask 255.255.255.0
+  network 172.19.1.0
+  broadcast 172.19.1.255
+  up /root/bin/vinculo_up_down up hamber
+  down /root/bin/vinculo_up_down down hamber
+
+
+

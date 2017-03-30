@@ -1,0 +1,74 @@
+#!/bin/bash
+# Script encargado de levantar las interfaces desactivadas si se supero un umbral
+# segundos del ultimo chequeo para levantar la interface
+
+set -o pipefail
+
+commons="/etc/network/check_common"
+# forzar el up a pesar de no superar el umbral
+# force != 1 -> no forzar
+# force  = 1 -> forzar
+
+force=0
+if [ ! "${1}x" == "x" ] ; then
+  force=$1
+fi
+
+. $commons
+
+
+dual_log "UP"  "=== START Check up ==="
+if ps ax | grep -v $$ | grep 'check_[u]p' | grep -q '[b]ash' ; then
+  dual_log "UP" "Otro proceso aun esta corriendo. Se sale"
+  dual_log "UP"  "=== FIN Check up ==="
+  exit 0
+fi
+
+for vinculo in ${VINCULOS[*]} ; do
+  dual_log "UP" "==========================="
+  dual_log "UP" $vinculo
+  dual_log "UP" "==========================="
+  id_vinculo=${VINCULO[$vinculo]}
+  if [ "${PPP_IF[$id_vinculo]}x" == "x" ] ; then
+    # cargo los exports del vinculo
+    dual_log "UP" "cargando exports $exports_dir/${vinculo}_exports"
+    . $exports_dir/${vinculo}_exports
+    ignore=0
+    for iif in ${ignore_iface[*]} ; do
+      if [ "$iif" == "$PPP_IFACE" ] ; then
+        ignore=1
+      fi
+    done
+    if [ $ignore -eq 1 ] ; then
+      dual_log "UP" "$vinculo ignorado!"
+      continue
+    fi
+    stamp=$(query_db "select check_stamp from checks where iface = '$PPP_IFACE' order by check_stamp desc limit 1;")
+    state=$(query_db "select status from checks where iface = '$PPP_IFACE' order by check_stamp desc limit 1;")
+    curr_stamp=$(query_db "select datetime('now','localtime');")
+    dual_log "UP" "ultimo chequeo fue el [$stamp] status [$state]"
+    secs_stamp=$(date -d "$stamp" "+%s")
+    secs_curr_stamp=$(date -d "$curr_stamp" "+%s")
+    delta=$(($secs_curr_stamp-$secs_stamp))
+    dual_log "UP" "pasaron $delta segundos desde el ultimo chequeo. Umbral $threshold."
+    if [ -z "$state" -o "$state" == 'down' ] ; then 
+      if [ $delta -gt $threshold -o -z "$state" -o $force -eq 1 ] ; then
+        dual_log "UP" "insert into checks (iface, status) values '($PPP_IFACE', 'up_attempted');"
+        query_db "insert into checks (iface, status) values ('$PPP_IFACE', 'up_attempted');"
+        dual_log "UP" "/sbin/ifup --force $PPP_IFACE"
+        lockfile -2 -l 300 $lock_file
+        /sbin/ifup --force $PPP_IFACE |& dual_log "UP"
+        rm -f $lock_file
+      else
+        dual_log "UP" "el umbral $threshold no fue superado"
+      fi
+    else
+      dual_log "UP" "El vinculo no esta presente y el estado es [$state]"
+    fi
+  else
+    dual_log "UP" "$vinculo ACTIVO. Se omite."
+  fi
+done
+dual_log "UP"  "=== FIN Check up ==="
+
+

@@ -1,0 +1,66 @@
+Aca se describen todos los archivos que integran el sistema de balanceo, firewall.
+
+/etc/init.d/firewall : El balanceo y las reglas.
+
+/etc/init.d/vinculo : La reglas de ruteo con la rutas.
+
+/etc/network/marcasfw : Definicion de las marcas de ruteo y otros parametros, con funciones de apoyo.
+
+/etc/network/initdb : Inicializacion de la base de datos para registro del estado de las interfaces
+
+/etc/network/check_common : Script que define funciones y variables en comun entre los otros scripts
+
+/etc/network/check_up : Script que levanta la interface caida si el ubmbral es superado
+
+/etc/network/check_down : Script que baja las interfaces que estan caidas.
+
+/etc/network/checks.db : La base de datos sqlite3 que registra los estados.
+
+/root/bin/{arnet, hamber, speedyf, astesano}_exports : Variables de entorno necesarias para levantar o bajar las interfaces
+
+/root/bin/update_dns_external_view : Script para actualizar el dns para consultas de afuera.
+
+/root/bin/vinculo_up_down : Script que es utilizado durante el proceso de arranque o para de una interface via /etc/network/interfaces
+
+/root/bin/xt_recent : Script para hacer backup/restore de las listas xt_recent
+
+/etc/ppp/ip-down.d/00actualizarDatosPPP : Script que actualiza el los archivos de estado de las interfaces durante la baja
+
+/etc/ppp/ip-down.d/10vinculo : Script llamador del configurador de ruteo y reglas durante la baja de una interface
+
+/etc/ppp/ip-down.d/20ddns : Scrip llamador del actualizador del dns durante la baja
+
+/etc/ppp/ip-up.d/00actualizarDatosPPP : Script que actualiza el los archivos de estado de las interfaces durante el alta
+
+/etc/ppp/ip-up.d/10vinculo : Script llamador del configurador de ruteo y reglas durante el alta de una interface
+
+/etc/ppp/ip-up.d/20ddns : Scrip llamador del actualizador del dns durante el alta
+
+/var/run/vinculo.status : Archivo que mantiene el estado del ruteo actual
+
+/var/run/pppstate.defs : Archivo que mantiene el estado de las interfaces levantadas.
+
+
+Cadena de uso durante el baja/alta de una interface
+
+  ifdown eth4.X
+     |
+     v
+  /etc/network/interfaces 
+     |
+     v
+  /root/bin/vinculo_up_down vinculoX
+     |
+     v
+  /root/bin/vinculoX_exports
+     .
+  00actualizarDatosPPP ------------------> /var/run/pppstate.defs 
+     .
+  10vinculo ------------------> /etc/init.d/vinculo
+     .                                  |
+     .                                  v
+     .                          /etc/init.d/firewall
+     .
+  20ddns ------->/root/bin/update_dns_external_view
+     
+

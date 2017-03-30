@@ -1,0 +1,25 @@
+#!/bin/bash
+
+lexmark_tonner_flag="/var/log/nagios3/lexmark_nagios"
+alarm_level=4
+
+#
+# La interface de un plugin de nagios requiere
+# umbrales por medio de argumentos -w -c
+# warning/critical respectivamente.
+# El plugin se llamara con -w 2 -c 3. 
+# Esto quiere decir si /var/log/log_trap_snmp  contiene 
+# 1:.* todo esta ok
+# 2:.* alrama warning
+# X:.* alarma critical. con X >= 3
+#
+# Como el trap que manejamos no nos informa del estado 
+# no tiene mucho sentido manejar el nivel de criticidad
+# por lo tanto pasaremos siempre de un "OK" a un "CRITICAL"
+# grabando un 4:.*.
+# 
+# Cuando se cambie el tonner habra que garbar 0:.* en el 
+# /var/log/nagios3/lexmark_nagios 
+echo $1 >> /var/log/log_trap_snmp
+echo $alarm_level > "$lexmark_tonner_flag"
+cat /var/log/log_trap_snmp | mail -s "TRAP!!" aosorio@terminalquequen.com.ar

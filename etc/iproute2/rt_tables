@@ -1,0 +1,17 @@
+#
+# reserved values
+#
+255	local
+254	main
+253	default
+0	unspec
+#
+# local
+#
+#1	inr.ruhep
+100     speedyf
+110     astesano
+120     zonanet
+130     hamber
+140	arnet
+# arnet esta planteado en la tabla main

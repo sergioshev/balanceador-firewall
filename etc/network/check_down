@@ -1,0 +1,69 @@
+#!/bin/bash
+# Script encargado de bajar las interfaces activas si detecta perdida
+# por medio del ping con marca
+
+commons="/etc/network/check_common"
+. $commons
+
+set -o pipefail
+
+dual_log "DOWN"  "=== START Check down ==="
+if ps ax | grep -v $$ | grep 'check_[d]own' | grep -q '[b]ash' ; then
+  dual_log "DOWN" "Otro proceso aun esta corriendo. Se sale"
+  dual_log "DOWN"  "=== FIN Check down ==="
+  exit 0
+fi
+
+
+for vinculo in ${VINCULOS[*]} ; do
+  dual_log "DOWN" "==========================="
+  dual_log "DOWN" $vinculo
+  dual_log "DOWN" "==========================="
+  id_vinculo=${VINCULO[$vinculo]}
+  ignore=0
+  for iif in ${ignore_iface[*]} ; do
+    if [ "$iif" == "${PPP_IF[$id_vinculo]}" ] ; then
+      ignore=1
+    fi
+  done
+  if [ $ignore -eq 1 ] ; then
+    dual_log "DOWN" "$vinculo ignorado!"
+    continue
+  fi
+  if [ "${PPP_IF[$id_vinculo]}x" != "x" ] ; then
+    marca=${MARCA[$vinculo]}
+    dual_log "DOWN" "$vinculo activo. Probando ping con marca $marca"
+    target_host=${target_hosts[$(($RANDOM%${#target_hosts[@]}))]}
+    ping -q -m $marca -w 20 -c 5 $target_host |& dual_log "DOWN"
+    res=$?
+    if [ $res -ne 0 ] ; then 
+      for target_host in ${target_hosts[@]} ; do
+        ping -q -m $marca -w 20 -c 5 $target_host |& dual_log "DOWN"
+        res=$?
+        [ $res -eq 0 ] && break
+      done
+    fi
+    state="down"
+    [ $res -eq 0 ] && state="up"
+    db_state=$(query_db "select status from checks where iface = '${PPP_IF[$id_vinculo]}' order by check_stamp desc limit 1;")
+    db_stamp=$(query_db "select check_stamp from checks where iface = '${PPP_IF[$id_vinculo]}' order by check_stamp desc limit 1;") 
+    if [ "$db_state" == "$state" ] ; then 
+      dual_log "DOWN" "update checks set check_stamp = datetime('now','localtime') where iface = '${PPP_IF[$id_vinculo]}' and check_stamp = '$db_stamp';"
+      query_db "update checks set check_stamp = datetime('now','localtime') where iface = '${PPP_IF[$id_vinculo]}' and check_stamp = '$db_stamp';"
+    else
+      dual_log "DOWN" "insert into checks (iface, status) values ('${PPP_IF[$id_vinculo]}', '$state');"
+      query_db "insert into checks (iface, status) values ('${PPP_IF[$id_vinculo]}', '$state');"
+    fi
+    if [ $res -gt 0 ] ; then
+      dual_log "DOWN" "Se detecto el vinculo $vinculo como caido. Se apaga la interface ${PPP_IF[$id_vinculo]}"
+      dual_log "DOWN" "/sbin/ifdown --force ${PPP_IF[$id_vinculo]}"
+      lockfile -2 -l 300 $lock_file
+      /sbin/ifdown --force ${PPP_IF[$id_vinculo]} |& dual_log "DOWN"
+      rm -f $lock_file
+    fi
+  else
+    dual_log "DOWN" "$vinculo INACTIVO. Se omite."
+  fi
+done
+dual_log "DOWN"  "=== FIN Check down ==="
+

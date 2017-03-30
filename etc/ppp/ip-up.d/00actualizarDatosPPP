@@ -1,0 +1,27 @@
+#!/bin/bash
+#
+# $Id: actualizarDatosSpeedy,v 1.2 2006-04-02 23:01:25 hcurti Exp $
+# 
+# Script que guarda la información de la conexión speedy actual en un
+# archivo que puede ser consultado para construir la tabla de rutas.
+# se protege mediante un archivo semáforo de posibles accesos concurrentes.
+
+LOCK=/var/lock/pppstate.lock
+ESTADO=/var/run/pppstate.defs
+
+lockfile -2 -l 120 $LOCK && \
+if [ -r $ESTADO ] ; then
+  egrep -v "^PPP_[^[]+\[${PPP_IPPARAM}\]" $ESTADO > $ESTADO.new
+else
+  rm -f $ESTADO.new
+fi
+cat <<FFAA >>$ESTADO.new 
+PPP_IF[${PPP_IPPARAM}]="$PPP_IFACE"
+PPP_IPL[${PPP_IPPARAM}]="$PPP_LOCAL"
+PPP_IPR[${PPP_IPPARAM}]="$PPP_REMOTE"
+FFAA
+mv -f $ESTADO.new $ESTADO || \
+  ! echo "Error actualizando datos de ppp ${PPP_IPPARAM}" >&2
+RETORNO=$?
+rm -f $LOCK
+exit $RETORNO
